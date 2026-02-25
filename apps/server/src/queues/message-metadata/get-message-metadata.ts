@@ -68,6 +68,10 @@ const urlMetadataParser = async (
 
       const metadata = await getLinkPreview(url, {
         followRedirects: 'follow',
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)'
+        },
         resolveDNSHost: async (url: string) => {
           return new Promise((resolve, reject) => {
             try {
@@ -104,12 +108,27 @@ const urlMetadataParser = async (
 
       if (!metadata) return;
 
+      // ensure videos array values are strings (link-preview-js may return
+      // objects with url/width/height). the returned type is a union so we
+      // must first check that the property exists.
+      if ('videos' in metadata && Array.isArray(metadata.videos)) {
+        metadata.videos = metadata.videos.map((v: any) =>
+          typeof v === 'string' ? v : v?.url || ''
+        );
+      }
+
       metadataCache.set(url, metadata);
 
       return metadata;
     });
 
-    const metadata = (await Promise.all(promises)) as TMessageMetadata[]; // TODO: fix these types
+    let metadata = (await Promise.all(promises)) as TMessageMetadata[]; // TODO: fix these types
+
+    // rewrite any URLs found inside the metadata objects (e.g. images)
+    if (metadata && metadata.length > 0) {
+      const { rewriteMetadataUrls } = await import('../../helpers/cache-remote-images');
+      metadata = await rewriteMetadataUrls(metadata);
+    }
 
     return metadata ?? [];
   } catch {

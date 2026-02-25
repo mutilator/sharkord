@@ -8,9 +8,10 @@ type TImageOverrideProps = {
   src: string;
   alt?: string;
   title?: string;
+  label?: string;
 };
 
-const ImageOverride = memo(({ src, alt }: TImageOverrideProps) => {
+const ImageOverride = memo(({ src, alt, label }: TImageOverrideProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
 
@@ -49,13 +50,15 @@ const ImageOverride = memo(({ src, alt }: TImageOverrideProps) => {
           alt={alt}
           onLoad={onLoad}
           onError={onError}
-          className="max-w-full max-h-[300px] object-contain object-left w-fit"
+          // global `.msg-content img` gives all images a tiny fixed size; we
+          // need to undo that here so our override can grow to fit.
+          className="!h-auto !w-auto max-w-full max-h-[300px] object-contain object-left w-fit"
           style={{ opacity: 0 }}
           crossOrigin="anonymous"
         />
       )}
 
-      <LinkOverride link={src} label="Open in new tab" />
+      <LinkOverride link={src} label={label || 'Open in new tab'} />
     </OverrideLayout>
   );
 });

@@ -79,6 +79,11 @@ const onLoad = (ctx: PluginContext) => {
   ctx.events.on("user:joined", ({ userId, username }) => {
     ctx.log(`User joined: ${username} (ID: ${userId})`);
   });
+
+  // plugins can also react to message lifecycle events:
+  ctx.events.on("message:created", ({ content }) => {
+    ctx.log(`New message was created: ${content}`);
+  });
 };
 
 const onUnload = (ctx: PluginContext) => {
@@ -114,6 +119,34 @@ Called when the plugin is unloaded or the server shuts down. Use this to:
 - Save state
 
 **Note:** All event listeners and commands are automatically unregistered when the plugin unloads.
+
+## Commands
+
+Plugins may also perform certain server‑side actions directly via the `ctx.actions` helper.  Currently the supported
+categories are `voice` (for interacting with the mediasoup stack) and `messages` (added in the recent change).
+
+### Message Actions
+
+The `messages` namespace gives your plugin the ability to create, edit or delete chat messages programmatically.  This
+is useful for bots, system notifications, or any automation you want to drive from a plugin.
+
+```ts
+// inside onLoad or a command handler
+ctx.actions.messages.create({
+  channelId: 12,
+  userId: 5,               // must point to a real user account
+  content: '<p>Hello from plugin!</p>'
+});
+
+ctx.actions.messages.update(42, '<p>edited</p>');
+ctx.actions.messages.delete(42);
+```
+
+All of the same side‑effects that the normal message API performs are executed – events are emitted, clients are
+notified via pubsub, reply counts are recalculated, and attached files (if any) are cleaned up on deletion.
+
+You do **not** get any permission checks; calling code is considered trusted.  Make sure you only act on messages when
+it makes sense for your plugin.
 
 ## Commands
 

@@ -13,9 +13,8 @@ import { memo, useCallback, useMemo } from 'react';
 import { toast } from 'sonner';
 import { FileCard } from '../file-card';
 import { MessageReactions } from '../message-reactions';
-import { ImageOverride } from '../overrides/image';
 import { serializer } from './serializer';
-import type { TFoundMedia } from './types';
+import { ImageOverride } from '../overrides/image';
 
 type TMessageRendererProps = {
   message: TJoinedMessage;
@@ -33,16 +32,45 @@ const MessageRenderer = memo(({ message }: TMessageRendererProps) => {
     [message.content]
   );
 
-  const { foundMedia, messageHtml } = useMemo(() => {
-    const foundMedia: TFoundMedia[] = [];
-
-    const messageHtml = parse(message.content ?? '', {
-      replace: (domNode) =>
-        serializer(domNode, (found) => foundMedia.push(found), message.id)
+  const messageHtml = useMemo(() => {
+    const metadataMap = new Map<string, any>();
+    const normalize = (u: string) => {
+      try {
+        return new URL(u).toString();
+      } catch {
+        return u;
+      }
+    };
+    (message.metadata || []).forEach((m) => {
+      if (m && typeof m.url === 'string') {
+        metadataMap.set(normalize(m.url), m);
+      }
     });
 
-    return { messageHtml, foundMedia };
-  }, [message.content, message.id]);
+    return parse(message.content ?? '', {
+      replace: (domNode) => serializer(domNode, message.id, metadataMap)
+    });
+  }, [message.content, message.metadata, message.id]);
+
+  // uploaded image files should also appear inline below the message rather
+  // than only as a separate file card. this mirrors the previous
+  // "allMedia" logic that combined foundMedia and file images.
+  const imageFiles = useMemo(
+    () =>
+      message.files
+        .filter((file) =>
+          imageExtensions.includes(file.extension.toLowerCase())
+        )
+        .map((file) => ({
+          url: getFileUrl(file),
+          label: file.originalName
+        })),
+    [message.files]
+  );
+
+  // metadata and rich previews are fully handled by serializer via metadataMap;
+  // plain <img> tags and image links are converted into ImageOverride by the
+  // serializer so they aren't collapsed by the global msg-content stylesheet.
 
   const onRemoveFileClick = useCallback(async (fileId: number) => {
     if (!fileId) return;
@@ -68,16 +96,6 @@ const MessageRenderer = memo(({ message }: TMessageRendererProps) => {
     }
   }, []);
 
-  const allMedia = useMemo(() => {
-    const mediaFromFiles: TFoundMedia[] = message.files
-      .filter((file) => imageExtensions.includes(file.extension.toLowerCase()))
-      .map((file) => ({
-        type: 'image',
-        url: getFileUrl(file)
-      }));
-
-    return [...foundMedia, ...mediaFromFiles];
-  }, [foundMedia, message.files]);
 
   return (
     <div className="flex flex-col gap-1">
@@ -90,15 +108,17 @@ const MessageRenderer = memo(({ message }: TMessageRendererProps) => {
         {messageHtml}
       </div>
 
-      {allMedia.map((media, index) => {
-        if (media.type === 'image') {
-          return <ImageOverride src={media.url} key={`media-image-${index}`} />;
-        }
-
-        return null;
-      })}
 
       <MessageReactions reactions={message.reactions} messageId={message.id} />
+
+      {/* render inline image uploads */}
+      {imageFiles.map((file, index) => (
+        <ImageOverride
+          key={`file-image-${index}`}
+          src={file.url}
+          label={file.label}
+        />
+      ))}
 
       {message.files.length > 0 && (
         <div className="flex gap-1 flex-wrap">

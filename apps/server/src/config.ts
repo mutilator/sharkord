@@ -38,10 +38,16 @@ const zConfig = z.object({
       maxRequests: z.coerce.number().int().positive(),
       windowMs: z.coerce.number().int().positive()
     })
+  }),
+  cache: z.object({
+    remoteImageTimeoutMs: z.coerce.number().int().positive(),
+    remoteImageMaxBytes: z.coerce.number().int().positive()
   })
 });
 
 type TConfig = z.infer<typeof zConfig>;
+
+
 
 const defaultConfig: TConfig = {
   server: {
@@ -67,6 +73,10 @@ const defaultConfig: TConfig = {
       maxRequests: 5,
       windowMs: 60_000
     }
+  },
+  cache: {
+    remoteImageTimeoutMs: 5000,
+    remoteImageMaxBytes: 5_000_000 // 5 MB
   }
 };
 
@@ -110,7 +120,9 @@ config = applyEnvOverrides(config, {
   'server.autoupdate': 'SHARKORD_AUTOUPDATE',
   'webRtc.port': 'SHARKORD_WEBRTC_PORT',
   'webRtc.announcedAddress': 'SHARKORD_WEBRTC_ANNOUNCED_ADDRESS',
-  'webRtc.maxBitrate': 'SHARKORD_WEBRTC_MAX_BITRATE'
+  'webRtc.maxBitrate': 'SHARKORD_WEBRTC_MAX_BITRATE',
+  'cache.remoteImageTimeoutMs': 'SHARKORD_REMOTE_CACHE_TIMEOUT_MS',
+  'cache.remoteImageMaxBytes': 'SHARKORD_REMOTE_CACHE_MAX_BYTES'
 });
 
 config = Object.freeze(config);

@@ -82,6 +82,11 @@ const sendMessageRoute = rateLimitedProcedure(protectedProcedure, {
 
     let targetContent = sanitizeMessageHtml(input.content);
 
+    // cache any external images and rewrite their URLs before persisting
+    targetContent = await import('../../helpers/cache-remote-images').then((m) =>
+      m.rewriteRemoteImages(targetContent)
+    );
+
     invariant(!isEmptyMessage(input.content) || input.files.length != 0, {
       code: 'BAD_REQUEST',
       message:
@@ -211,6 +216,16 @@ const sendMessageRoute = rateLimitedProcedure(protectedProcedure, {
           createdAt: Date.now()
         });
       }
+    }
+
+    // generate metadata synchronously so that the initial event that gets
+    // published (and the db row) contains the embed info.  we still enqueue
+    // as a backup in case the sync call fails or is unintentionally removed.
+    try {
+      const { processMessageMetadata } = await import('../../queues/message-metadata/get-message-metadata');
+      await processMessageMetadata(targetContent, message.id);
+    } catch {
+      // ignore; queue will handle it shortly
     }
 
     publishMessage(message.id, input.channelId, 'create');

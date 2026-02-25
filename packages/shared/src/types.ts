@@ -59,6 +59,8 @@ export type TMessageMetadata = {
   images?: string[];
   videos?: string[];
   favicons?: string[];
+  // plugins can add arbitrary metadata such as embeds
+  [key: string]: any;
 };
 
 export type WithOptional<T, K extends keyof T> = Omit<T, K> &

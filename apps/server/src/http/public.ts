@@ -10,6 +10,21 @@ import { verifyFileToken } from '../helpers/files-crypto';
 import { PUBLIC_PATH } from '../helpers/paths';
 import { logger } from '../logger';
 
+// lightweight extension -> mime lookup for cached remote files
+const extToMime: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4',
+  '.mp3': 'audio/mpeg'
+};
+
+const lookupMime = (ext: string) => extToMime[ext.toLowerCase()] || 'application/octet-stream';
+
 const publicRouteHandler = async (
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -22,6 +37,40 @@ const publicRouteHandler = async (
 
   const url = new URL(req.url!, `http://${req.headers.host}`);
   const fileName = decodeURIComponent(path.basename(url.pathname));
+
+  // special case: files cached under /remote are not stored in the database
+  if (url.pathname.startsWith('/remote/')) {
+    // treat the remainder as a simple path under PUBLIC_PATH/remote
+    const localName = path.basename(url.pathname);
+    const localPath = path.join(PUBLIC_PATH, 'remote', localName);
+
+    if (!fs.existsSync(localPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'File not found' }));
+      return;
+    }
+
+    const stat = fs.statSync(localPath);
+    const ext = path.extname(localName).toLowerCase();
+    const mimeType = lookupMime(ext) || 'application/octet-stream';
+
+    const stream = fs.createReadStream(localPath);
+    res.writeHead(200, {
+      'Content-Type': mimeType,
+      'Content-Length': stat.size,
+      'Content-Disposition': 'inline'
+    });
+    stream.pipe(res);
+    stream.on('error', (err) => {
+      logger.error('Error serving remote file:', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error' }));
+      }
+    });
+    stream.on('end', () => res.end());
+    return;
+  }
 
   const dbFile = await db
     .select()

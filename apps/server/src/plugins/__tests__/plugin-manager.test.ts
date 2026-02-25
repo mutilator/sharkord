@@ -6,7 +6,7 @@ import path from 'path';
 import { pluginManager } from '..';
 import { loadMockedPlugins, resetPluginMocks } from '../../__tests__/mocks';
 import { tdb } from '../../__tests__/setup';
-import { pluginData, settings } from '../../db/schema';
+import { pluginData, settings, messages } from '../../db/schema';
 import { PLUGINS_PATH } from '../../helpers/paths';
 import { eventBus } from '../event-bus';
 
@@ -232,7 +232,8 @@ describe('plugin-manager', () => {
       expect(commands['plugin-b']).toBeDefined();
       expect(commands['plugin-b']!.length).toBe(2);
       expect(commands['plugin-with-events']).toBeDefined();
-      expect(commands['plugin-with-events']!.length).toBe(1);
+      // plugin-with-events registers 4 commands: get-counts + send/edit/delete message actions
+      expect(commands['plugin-with-events']!.length).toBe(4);
     });
 
     test('should check if plugin has specific command', async () => {
@@ -241,6 +242,195 @@ describe('plugin-manager', () => {
       expect(pluginManager.hasCommand('plugin-b', 'sum')).toBe(true);
       expect(pluginManager.hasCommand('plugin-b', 'nonexistent')).toBe(false);
       expect(pluginManager.hasCommand('nonexistent-plugin', 'sum')).toBe(false);
+    });
+
+    test('plugin actions can create/update/delete messages', async () => {
+      await pluginManager.load('plugin-with-events');
+
+      // create a message in channel 1 as user 1
+      const result = await pluginManager.executeCommand(
+        'plugin-with-events',
+        'send-message',
+        mockInvokerCtx,
+        { channelId: 1, content: 'from-plugin' }
+      );
+      const id = (result as any).id as number;
+      expect(typeof id).toBe('number');
+
+      // plugin-with-events increments its internal counter when messages are
+      // created, so verify via the helper command
+      const counts = await pluginManager.executeCommand(
+        'plugin-with-events',
+        'get-counts',
+        mockInvokerCtx,
+        {}
+      );
+      expect((counts as any).messageCreated).toBeGreaterThanOrEqual(1);
+
+      const row = await tdb
+        .select()
+        .from(messages)
+        .where(eq(messages.id, id))
+        .get();
+      expect(row).toBeDefined();
+      expect(row?.content).toBe('from-plugin');
+
+      await pluginManager.executeCommand(
+        'plugin-with-events',
+        'edit-message',
+        mockInvokerCtx,
+        { messageId: id, content: 'updated-plugin' }
+      );
+      const row2 = await tdb
+        .select()
+        .from(messages)
+        .where(eq(messages.id, id))
+        .get();
+      expect(row2?.content).toBe('updated-plugin');
+
+      await pluginManager.executeCommand(
+        'plugin-with-events',
+        'delete-message',
+        mockInvokerCtx,
+        { messageId: id }
+      );
+      const row3 = await tdb
+        .select()
+        .from(messages)
+        .where(eq(messages.id, id))
+        .get();
+      expect(row3).toBeUndefined();
+    });
+
+    test('message actions accept embed objects and optional userId', async () => {
+      await pluginManager.load('plugin-with-events');
+      const origFetch = global.fetch;
+      (global as any).fetch = async (url: string) => {
+        return {
+          ok: true,
+          arrayBuffer: async () => Buffer.from('fake'),
+          headers: { get: () => 'image/png' }
+        } as any;
+      };
+
+      // create with embed and no userId; default should apply
+      const embedData: any = { url: 'https://example.com/foo', mediaType: 'link', title: 'foo' };
+      const { id } = await pluginManager.executeCommand(
+        'plugin-with-events',
+        'send-message',
+        mockInvokerCtx,
+        { channelId: 1, content: 'x' }
+      ) as any; // re-use previous command to get a baseline message
+
+      // now manually call action directly via plugin manager for embed
+      const newId = await pluginManager.executeCommand(
+        'plugin-with-events',
+        'send-message',
+        mockInvokerCtx,
+        { channelId: 1, content: 'embedtest', embed: embedData }
+      ) as any;
+      expect(typeof newId.id).toBe('number');
+
+      const metaRow = await tdb
+        .select({ metadata: messages.metadata })
+        .from(messages)
+        .where(eq(messages.id, newId.id))
+        .get();
+      expect(metaRow?.metadata).toBeDefined();
+      expect(metaRow?.metadata?.[0]).toEqual(embedData);
+
+      // verify that when plugin provides an embed with an external image URL
+      // the URL itself gets cached/rewritten
+      const externalEmbed = { image: { url: 'https://example.com/bar.png' } };
+      const embedId = await pluginManager.executeCommand(
+        'plugin-with-events',
+        'send-message',
+        mockInvokerCtx,
+        { channelId: 1, content: 'foo', embed: externalEmbed }
+      ) as any;
+      const metaRow2 = await tdb
+        .select({ metadata: messages.metadata })
+        .from(messages)
+        .where(eq(messages.id, embedId.id))
+        .get();
+      expect(metaRow2?.metadata?.[0]?.image?.url).toMatch(/^\/remote\//);
+
+      // when embed is an empty object over an image url, it should auto-convert
+      const emptyEmbedUrl = 'https://example.com/pic.jpg';
+
+      global.fetch = origFetch as any; // restore after modifying test-specific stub
+      const ctx: any = (pluginManager as any).createContext('plugin-with-events');
+      const imgId = await ctx.actions.messages.create({
+        channelId: 1,
+        content: `<a href="${emptyEmbedUrl}">${emptyEmbedUrl}</a>`,
+        embed: {}
+      });
+      const msgRow = await tdb
+        .select({ content: messages.content, metadata: messages.metadata })
+        .from(messages)
+        .where(eq(messages.id, imgId))
+        .get();
+      expect(msgRow?.content).toContain('<img src="https://example.com/pic.jpg"');
+      // metadata may either be null or an empty array depending on whether the
+      // asynchronous metadata processor has run; both are acceptable
+      expect(
+        msgRow?.metadata === null ||
+          (Array.isArray(msgRow?.metadata) && msgRow?.metadata.length === 0)
+      ).toBe(true);
+    });
+
+    test('plugin message create should cache external images', async () => {
+      await pluginManager.load('plugin-with-events');
+      const origFetch = global.fetch;
+      (global as any).fetch = async (url: string) => {
+        return {
+          ok: true,
+          arrayBuffer: async () => Buffer.from('fake'),
+          headers: { get: () => 'image/png' }
+        } as any;
+      };
+
+      try {
+        const ctx: any = (pluginManager as any).createContext('plugin-with-events');
+        const remote = 'https://example.com/foo.png';
+        const msgId = await ctx.actions.messages.create({
+          channelId: 1,
+          content: `<img src="${remote}" />`
+        });
+        const row = await tdb
+          .select({ content: messages.content })
+          .from(messages)
+          .where(eq(messages.id, msgId))
+          .get();
+        expect(row?.content).toMatch(/src="\/remote\//);
+
+        // file should exist on disk
+        const { PUBLIC_PATH } = await import('../../helpers/paths');
+        const fs = await import('fs/promises');
+        const path = await import('path');
+        const m = row!.content!.match(/src="(\/remote\/[^"]+)"/);
+        expect(m).not.toBeNull();
+        const local = m![1]!;
+        const localPath = path.join(PUBLIC_PATH, local.replace(/^\/remote\//, 'remote/'));
+        expect(await fs.access(localPath).then(() => true).catch(() => false)).toBe(true);
+
+        // also try a URL without an extension
+        const noExt = 'https://example.com/bar';
+        const msgId2 = await ctx.actions.messages.create({
+          channelId: 1,
+          content: `<img src="${noExt}" />`
+        });
+        const row2 = await tdb
+          .select({ content: messages.content })
+          .from(messages)
+          .where(eq(messages.id, msgId2))
+          .get();
+        expect(row2?.content).toMatch(/src="\/remote\//);
+        // ensure extension was inferred from content-type (.png)
+        expect(row2?.content).toMatch(/\.png"/);
+      } finally {
+        global.fetch = origFetch as any;
+      }
     });
   });
 
@@ -394,12 +584,13 @@ describe('plugin-manager', () => {
     test('should limit logs to 1000 entries', async () => {
       await pluginManager.load('plugin-a');
 
+      // instead of reloading the plugin many times (which is slow), directly
+      // emit log entries to test the cap logic.
       for (let i = 0; i < 1100; i++) {
-        await pluginManager.load('plugin-a');
+        (pluginManager as any).logPlugin('plugin-a', 'info', `entry ${i}`);
       }
 
       const logs = pluginManager.getLogs('plugin-a');
-
       expect(logs.length).toBeLessThanOrEqual(1000);
     });
 

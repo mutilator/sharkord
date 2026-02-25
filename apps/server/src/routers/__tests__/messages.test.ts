@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { initTest } from '../../__tests__/helpers';
+import { tdb } from '../../__tests__/setup';
+import { messages } from '../../db/schema';
+import { eq, desc } from 'drizzle-orm';
 
 describe('messages router', () => {
   test('should throw when user lacks permissions (edit - not own message)', async () => {
@@ -88,20 +91,196 @@ describe('messages router', () => {
       files: []
     });
 
-    const messages = await caller.messages.get({
+    const resp = await caller.messages.get({
       channelId: 1,
       cursor: null,
       limit: 50
     });
 
-    expect(messages.messages).toBeDefined();
-    expect(messages.messages.length).toBeGreaterThan(0);
+    expect(resp.messages).toBeDefined();
+    expect(resp.messages.length).toBeGreaterThan(0);
 
-    const sentMessage = messages.messages[0];
+    const sentMessage = resp.messages[0];
 
     expect(sentMessage!.content).toBe('Test message content');
     expect(sentMessage!.channelId).toBe(1);
     expect(sentMessage!.userId).toBe(1);
+
+    // the metadata row should already exist even before any extra fetches or
+    // background jobs run. we query the raw table to avoid joinMessagesWithRelations
+    const raw = await tdb
+      .select({ metadata: messages.metadata })
+      .from(messages)
+      .where(eq(messages.id, sentMessage!.id))
+      .get();
+    expect(raw?.metadata).toBeTruthy();
+  });
+
+  test('should cache external images and rewrite src', async () => {
+    const { caller } = await initTest();
+
+    // monkey-patch global fetch so tests don't hit the network
+    const origFetch = global.fetch;
+    (global as any).fetch = async (url: string) => {
+      return {
+        ok: true,
+        arrayBuffer: async () => Buffer.from('fake'),
+        headers: { get: () => 'image/png' }
+      } as any;
+    };
+
+    try {
+      const remote = 'https://example.com/test.png';
+      await caller.messages.send({
+        channelId: 1,
+        content: `<img src="${remote}" />`,
+        files: []
+      });
+
+      const messages = await caller.messages.get({
+        channelId: 1,
+        cursor: null,
+        limit: 1
+      });
+      const msg = messages.messages[0]!;
+      expect(msg.content).toMatch(/src="\/remote\//);
+
+      const { PUBLIC_PATH } = await import('../../helpers/paths');
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const m = msg.content!.match(/src="(\/remote\/[^"]+)"/);
+      expect(m).not.toBeNull();
+      const local = m![1]!;
+      const localPath = path.join(PUBLIC_PATH, local.replace(/^\/remote\//, 'remote/'));
+      expect(await fs.access(localPath).then(() => true).catch(() => false)).toBe(true);
+    } finally {
+      global.fetch = origFetch as any;
+    }
+  });
+
+
+  test('should generate metadata on first channel load for messages missing it', async () => {
+    const { caller } = await initTest();
+
+    // send a message but then clear out metadata so join logic has to build it
+    const msgId = await caller.messages.send({
+      channelId: 1,
+      content: '<a href="https://example.com">https://example.com</a>',
+      files: []
+    });
+    await tdb.update(messages).set({ metadata: null }).where(eq(messages.id, msgId));
+
+    const resp = await caller.messages.get({ channelId: 1, cursor: null, limit: 10 });
+    const m = resp.messages.find((m) => m.id === msgId);
+    expect(m?.metadata && m.metadata.length).toBeGreaterThan(0);
+  });
+
+  test('should rewrite metadata on initial channel load', async () => {
+    const { caller } = await initTest();
+    // stub fetch so cacheImage works
+    const origFetch = global.fetch;
+    (global as any).fetch = async (url: string) => {
+      return {
+        ok: true,
+        arrayBuffer: async () => Buffer.from('fake'),
+        headers: { get: () => 'image/png' }
+      } as any;
+    };
+
+    try {
+      // insert message directly bypassing API, with unrewritten metadata
+      const remote = 'https://example.com/initial.png';
+      const msgId = await caller.messages.send({
+        channelId: 1,
+        content: 'hello',
+        files: []
+      });
+      // manually update database to add metadata containing external url
+      await tdb.update(messages).set({ metadata: [{ url: remote, mediaType: 'link' }] }).where(eq(messages.id, msgId));
+
+      // allow queue to run during rewrite when loading (should be quick)
+      await new Promise((r) => setTimeout(r, 20));
+
+      // now fetch messages - our join logic should rewrite metadata
+      const messagesResp = await caller.messages.get({
+        channelId: 1,
+        cursor: null,
+        limit: 10
+      });
+      const meta = messagesResp.messages.find((m) => m.id === msgId)!.metadata?.[0];
+      expect(meta).toBeDefined();
+      expect(meta!.url).toMatch(/^\/remote\//);
+    } finally {
+      global.fetch = origFetch as any;
+    }
+  });
+
+  test('sending a link produces metadata immediately in DB', async () => {
+    const { caller } = await initTest();
+    const url = 'https://bun.com';
+
+    const messageId = await caller.messages.send({
+      channelId: 1,
+      content: `<p><a href="${url}">${url}</a></p>`,
+      files: []
+    });
+
+    const messagesResp = await caller.messages.get({
+      channelId: 1,
+      cursor: null,
+      limit: 1
+    });
+    const msg = messagesResp.messages.find((m) => m.id === messageId)!;
+    expect(msg.content).toContain('<a');
+
+    const row = await tdb
+      .select({ metadata: messages.metadata })
+      .from(messages)
+      .orderBy(desc(messages.id))
+      .limit(1)
+      .get();
+
+    expect(row?.metadata && row.metadata.length).toBeGreaterThan(0);
+  });
+
+  // pre-existing content should also be rewritten during join
+  test('should rewrite image URLs in content for existing messages', async () => {
+    const { caller } = await initTest();
+    // stub fetch for cacheImage during join rewrite
+    const origFetch = global.fetch;
+    (global as any).fetch = async (url: string) => {
+      return {
+        ok: true,
+        arrayBuffer: async () => Buffer.from('fake'),
+        headers: { get: () => 'image/png' }
+      } as any;
+    };
+
+    try {
+      const remote = 'https://example.com/old.png';
+      const msgRow = await tdb
+        .insert(messages)
+        .values({
+          channelId: 1,
+          userId: 1,
+          content: `<img src=\"${remote}\" />`,
+          editable: true,
+          parentMessageId: null,
+          createdAt: Date.now()
+        })
+        .returning()
+        .get();
+
+      const messagesResp = await caller.messages.get({
+        channelId: 1,
+        cursor: null,
+        limit: 10
+      });
+      const msg = messagesResp.messages.find((m) => m.id === msgRow.id)!;
+      expect(msg.content).toMatch(/src="\/remote\//);
+    } finally {
+      global.fetch = origFetch as any;
+    }
   });
 
   test('should get messages from channel', async () => {
@@ -172,6 +351,53 @@ describe('messages router', () => {
     expect(editedMessage!.content).toBe('Edited content');
     expect(editedMessage!.updatedAt).toBeDefined();
     expect(editedMessage!.updatedAt).not.toBeNull();
+  });
+
+  
+  // verify caching of remote images happens automatically when sending
+  test('should cache external images and rewrite src', async () => {
+    const { caller } = await initTest();
+
+    // stub global fetch so we don't depend on network
+    const origFetch = global.fetch;
+    (global as any).fetch = async (url: string) => {
+      return {
+        ok: true,
+        arrayBuffer: async () => Buffer.from('fake'),
+        headers: {
+          get: (h: string) => 'image/png'
+        }
+      } as any;
+    };
+
+    try {
+      const remote = 'https://example.com/test.png';
+      await caller.messages.send({
+        channelId: 1,
+        content: `<img src="${remote}" />`,
+        files: []
+      });
+
+      const messages = await caller.messages.get({
+        channelId: 1,
+        cursor: null,
+        limit: 1
+      });
+      const msg = messages.messages[0]!;
+      expect(msg.content).toMatch(/src="\/remote\//);
+
+      // ensure file was written
+      const { PUBLIC_PATH } = await import('../../helpers/paths');
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const matched = msg.content!.match(/src="(\/remote\/[^"]+)"/);
+      expect(matched).not.toBeNull();
+      const local = matched![1]!;
+      const localPath = path.join(PUBLIC_PATH, local.replace(/^\/remote\//, 'remote/'));
+      expect(await fs.access(localPath).then(() => true).catch(() => false)).toBe(true);
+    } finally {
+      global.fetch = origFetch as any;
+    }
   });
 
   test('should allow admin to edit any message', async () => {

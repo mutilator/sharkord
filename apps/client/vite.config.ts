@@ -17,5 +17,13 @@ export default defineConfig({
   },
   define: {
     VITE_APP_VERSION: JSON.stringify(pkg.version)
+  },
+  server: {
+    proxy: {
+      '/remote': {
+        target: 'http://localhost:4991',
+        changeOrigin: true
+      }
+    }
   }
 });

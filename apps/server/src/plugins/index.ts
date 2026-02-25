@@ -28,6 +28,12 @@ import path from 'path';
 import { db } from '../db';
 import { getSettings } from '../db/queries/server';
 import { pluginData } from '../db/schema';
+import { channels, users, messages } from '../db/schema';
+import { sanitizeMessageHtml } from '../helpers/sanitize-html';
+import { publishMessage, publishReplyCount } from '../db/publishers';
+import { enqueueProcessMetadata } from '../queues/message-metadata';
+import { getFilesByMessageId } from '../db/queries/files';
+import { removeFile } from '../db/mutations/files';
 import { PLUGINS_PATH } from '../helpers/paths';
 import { logger } from '../logger';
 import { VoiceRuntime } from '../runtimes/voice';
@@ -713,9 +719,7 @@ class PluginManager {
             const channel = VoiceRuntime.findById(channelId);
 
             if (!channel) {
-              throw new Error(
-                `Voice runtime not found for channel ID ${channelId}`
-              );
+              throw new Error(`Voice runtime not found for channel ID ${channelId}`);
             }
 
             return channel.getRouter();
@@ -800,6 +804,212 @@ class PluginManager {
             };
           },
           getListenInfo: () => VoiceRuntime.getListenInfo()
+        },
+        messages: {
+          create: async (opts: {
+            channelId: number;
+            userId?: number;
+            content?: string;
+            parentMessageId?: number | null;
+            embed?: unknown;
+          }) => {
+            // channel must exist
+            const channelExists = await db
+              .select({ id: channels.id })
+              .from(channels)
+              .where(eq(channels.id, opts.channelId))
+              .limit(1)
+              .get();
+            if (!channelExists) {
+              throw new Error(`Channel ${opts.channelId} does not exist`);
+            }
+
+            // default user id to 1 (system) when not provided
+            const authorId = opts.userId ?? 1;
+            const userExists = await db
+              .select({ id: users.id })
+              .from(users)
+              .where(eq(users.id, authorId))
+              .limit(1)
+              .get();
+            if (!userExists) {
+              throw new Error(`User ${authorId} does not exist`);
+            }
+
+            let contentStr = sanitizeMessageHtml(opts.content ?? '');
+            // make sure remote images are cached
+            contentStr = await import('../helpers/cache-remote-images').then((m) =>
+              m.rewriteRemoteImages(contentStr)
+            );
+            let embedVal: any = opts.embed;
+            if (embedVal && typeof embedVal === 'object') {
+              const { rewriteMetadataUrls } = await import('../helpers/cache-remote-images');
+              const rewritten = await rewriteMetadataUrls([embedVal]);
+              embedVal = rewritten[0];
+            }
+            // if embed object is empty, try to convert to an <img> automatically
+            if (
+              embedVal &&
+              typeof embedVal === 'object' &&
+              Object.keys(embedVal).length === 0
+            ) {
+              const urlMatch = (opts.content ?? '').match(
+                /https?:\/\/[\w\-./?&=%]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?/i
+              );
+              if (urlMatch) {
+                contentStr = `<img src="${urlMatch[0]}" />`;
+                embedVal = undefined;
+              }
+            }
+
+            const message = await db
+              .insert(messages)
+              .values({
+                channelId: opts.channelId,
+                userId: authorId,
+                content: contentStr,
+                editable: true,
+                parentMessageId: opts.parentMessageId ?? null,
+                metadata: (embedVal ? [embedVal] : []) as any,
+                createdAt: Date.now()
+              })
+              .returning()
+              .get();
+
+            const messageId = message.id;
+
+            if (opts.parentMessageId) {
+              publishReplyCount(opts.parentMessageId, opts.channelId);
+            }
+
+            publishMessage(messageId, opts.channelId, 'create');
+            // only auto-process metadata when plugin didn't supply custom data
+            if (embedVal === undefined) {
+              enqueueProcessMetadata(contentStr, messageId);
+            }
+            eventBus.emit('message:created', {
+              messageId,
+              channelId: opts.channelId,
+              userId: authorId,
+              content: contentStr
+            });
+
+            return messageId;
+          },
+          update: async (
+            messageId: number,
+            newContent: string | { content?: string; embed?: unknown }
+          ) => {
+            const msg = await db
+              .select({
+                channelId: messages.channelId,
+                userId: messages.userId,
+                metadata: messages.metadata
+              })
+              .from(messages)
+              .where(eq(messages.id, messageId))
+              .limit(1)
+              .get();
+            if (!msg) {
+              throw new Error(`Message ${messageId} not found`);
+            }
+
+            let contentStr = '';
+            let embedData: unknown | undefined;
+            if (typeof newContent === 'object' && newContent !== null) {
+              if (newContent.content != null) {
+                contentStr = sanitizeMessageHtml(String(newContent.content));
+              }
+              if ('embed' in newContent) {
+                embedData = newContent.embed;
+              }
+            } else {
+              contentStr = sanitizeMessageHtml(newContent);
+            }
+            // cache remote images in updated content as well
+            if (contentStr) {
+              contentStr = await import('../helpers/cache-remote-images').then(
+                (m) => m.rewriteRemoteImages(contentStr)
+              );
+            }
+            if (embedData && typeof embedData === 'object') {
+              const { rewriteMetadataUrls } = await import('../helpers/cache-remote-images');
+              const rewritten = await rewriteMetadataUrls([embedData]);
+              embedData = rewritten[0];
+            }
+
+            // convert empty embed to image if possible
+            if (
+              embedData &&
+              typeof embedData === 'object' &&
+              Object.keys(embedData).length === 0
+            ) {
+              const urlMatch = (typeof newContent === 'string'
+                ? newContent
+                : newContent.content || '')?.match(
+                /https?:\/\/[\w\-./?&=%]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?/i
+              );
+              if (urlMatch) {
+                contentStr = `<img src="${urlMatch[0]}" />`;
+                embedData = undefined;
+              }
+            }
+
+            const updateObj: any = { updatedAt: Date.now() };
+            if (contentStr !== '') {
+              updateObj.content = contentStr;
+            }
+            if (embedData !== undefined) {
+              const existingMeta: any[] = (msg.metadata as any) || [];
+              existingMeta.push(embedData);
+              updateObj.metadata = existingMeta;
+            }
+
+            await db.update(messages).set(updateObj).where(eq(messages.id, messageId));
+
+            publishMessage(messageId, msg.channelId, 'update');
+            if (contentStr) enqueueProcessMetadata(contentStr, messageId);
+            eventBus.emit('message:updated', {
+              messageId,
+              channelId: msg.channelId,
+              userId: msg.userId,
+              content: contentStr
+            });
+          },
+          delete: async (messageId: number) => {
+            const targetMessage = await db
+              .select({
+                userId: messages.userId,
+                channelId: messages.channelId,
+                parentMessageId: messages.parentMessageId
+              })
+              .from(messages)
+              .where(eq(messages.id, messageId))
+              .limit(1)
+              .get();
+            if (!targetMessage) {
+              throw new Error(`Message ${messageId} not found`);
+            }
+
+            const files = await getFilesByMessageId(messageId);
+            if (files.length > 0) {
+              await Promise.all(files.map((f) => removeFile(f.id)));
+            }
+
+            await db.delete(messages).where(eq(messages.id, messageId));
+
+            publishMessage(messageId, targetMessage.channelId, 'delete');
+            if (targetMessage.parentMessageId) {
+              publishReplyCount(
+                targetMessage.parentMessageId,
+                targetMessage.channelId
+              );
+            }
+            eventBus.emit('message:deleted', {
+              channelId: targetMessage.channelId,
+              messageId
+            });
+          }
         }
       },
       commands: {

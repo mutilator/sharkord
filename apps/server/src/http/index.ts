@@ -41,6 +41,7 @@ const routeHandlers: Partial<
     },
     prefix: {
       '/public': (req, res) => publicRouteHandler(req, res),
+      '/remote': (req, res) => publicRouteHandler(req, res),
       '/plugin-components': (req, res) =>
         pluginsComponentsRouteHandler(req, res),
       '/plugin-bundle': (req, res) => pluginBundleRouteHandler(req, res)

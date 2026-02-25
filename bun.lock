@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "sharkord",
+      "dependencies": {
+        "lucide-react": "0.544.0",
+      },
       "devDependencies": {
         "knip": "^5.80.0",
       },
@@ -84,6 +87,7 @@
         "ipaddr.js": "^2.3.0",
         "jsonwebtoken": "^9.0.2",
         "link-preview-js": "^3.1.0",
+        "lucide-react": "0.544.0",
         "mediasoup": "^3.19.17",
         "queue": "^7.0.0",
         "sanitize-html": "^2.17.0",

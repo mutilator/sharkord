@@ -58,7 +58,16 @@ const editMessageRoute = rateLimitedProcedure(protectedProcedure, {
       message: 'Message cannot be empty.'
     });
 
-    const sanitizedContent = sanitizeMessageHtml(input.content);
+    let sanitizedContent = sanitizeMessageHtml(input.content);
+
+    // cache any external images and rewrite their URLs before saving
+    try {
+      sanitizedContent = await import('../../helpers/cache-remote-images').then((m) =>
+        m.rewriteRemoteImages(sanitizedContent)
+      );
+    } catch {
+      // ignore failures
+    }
 
     invariant(!isEmptyMessage(input.content), {
       code: 'BAD_REQUEST',
@@ -73,6 +82,15 @@ const editMessageRoute = rateLimitedProcedure(protectedProcedure, {
         updatedAt: Date.now()
       })
       .where(eq(messages.id, input.messageId));
+
+    // similar to send route, process metadata synchronously so clients
+    // get the updated preview immediately.
+    try {
+      const { processMessageMetadata } = await import('../../queues/message-metadata/get-message-metadata');
+      await processMessageMetadata(sanitizedContent, input.messageId);
+    } catch {
+      // ignore
+    }
 
     publishMessage(input.messageId, message.channelId, 'update');
     enqueueProcessMetadata(sanitizedContent, input.messageId);

@@ -128,6 +128,39 @@ export interface PluginContext {
         announcedAddress: string | undefined;
       };
     };
+    messages: {
+      /**
+       * Create a message in a channel. The caller may supply an existing
+       * `userId` that will be recorded as the author; if omitted the server
+       * will fall back to a system user (usually id 1).  `content` is the
+       * sanitized HTML string to store.  Additional properties such as `embed`
+       * may be provided and will be persisted in the message metadata column.
+       *
+       * Returns the newly created message ID.
+       */
+      create(options: {
+        channelId: number;
+        userId?: number;
+        content?: string;
+        parentMessageId?: number | null;
+        embed?: unknown;
+      }): Promise<number>;
+
+      /**
+       * Update a message.  The second argument may be a simple string (new
+       * content) or an object containing `{ content?, embed? }`.  The latter
+       * form is used by the built‑in embeds plugin and mirrors the old
+       * `ctx.messages` API.
+       */
+      update(
+        messageId: number,
+        content: string | { content?: string; embed?: unknown }
+      ): Promise<void>;
+
+      /** Delete a message by id. Any attached files will be cleaned up just
+       * like the normal API. */
+      delete(messageId: number): Promise<void>;
+    };
   };
 
   commands: {

@@ -58,23 +58,26 @@ const TiptapInput = memo(
 
     const extensions = useMemo(() => {
       const exts = [
+        // StarterKit already includes the link extension; we configure it here
+        // instead of adding a second instance which was causing "duplicate
+        // extension name" warnings in the console.
         StarterKit.configure({
           hardBreak: {
             HTMLAttributes: {
               class: 'hard-break'
             }
-          }
-        }),
-        Link.configure({
-          autolink: true,
-          defaultProtocol: 'https',
-          openOnClick: false,
-          HTMLAttributes: {
-            target: '_blank',
-            rel: 'noopener noreferrer'
           },
-          shouldAutoLink: (url) => {
-            return /^https?:\/\//i.test(url);
+          link: {
+            autolink: true,
+            defaultProtocol: 'https',
+            openOnClick: false,
+            HTMLAttributes: {
+              target: '_blank',
+              rel: 'noopener noreferrer'
+            },
+            shouldAutoLink: (url) => {
+              return /^https?:\/\//i.test(url);
+            }
           }
         }),
         Emoji.configure({

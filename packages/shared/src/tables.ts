@@ -1,4 +1,5 @@
 import type { InferInsertModel, InferSelectModel } from 'drizzle-orm';
+import type { TMessageMetadata } from './types';
 import {
   activityLog,
   categories,
@@ -110,6 +111,7 @@ export type TJoinedMessage = TMessage & {
   files: TFile[];
   reactions: TJoinedMessageReaction[];
   replyCount?: number;
+  metadata?: TMessageMetadata[] | null;
 };
 
 export type TJoinedEmoji = TEmoji & {
