@@ -15,6 +15,7 @@ import { infoSelector } from './selectors';
 import { serverSliceActions } from './slice';
 import { initSubscriptions } from './subscriptions';
 import { type TDisconnectInfo } from './types';
+import { fetchServerInfo } from '../app/actions';
 
 let unsubscribeFromServer: (() => void) | null = null;
 
@@ -49,12 +50,17 @@ export const setInfo = (info: TServerInfo | undefined) => {
 };
 
 export const connect = async () => {
-  const state = store.getState();
-  const info = infoSelector(state);
-
+  // Fetch the latest server info every time we attempt to connect.  This
+  // addresses two scenarios:
+  //   * the app just started with no stored URL (info will be undefined)
+  //   * the user has changed the URL on the connect screen
+  // By always refreshing we avoid stale information and ensure the later
+  // handshake uses the proper server ID.
+  const info = await fetchServerInfo();
   if (!info) {
     throw new Error('Failed to fetch server info');
   }
+  setInfo(info);
 
   const { serverId } = info;
 

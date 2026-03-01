@@ -1,5 +1,5 @@
 import { PluginSlotRenderer } from '@/components/plugin-slot-renderer';
-import { connect } from '@/features/server/actions';
+import { connect, setInfo } from '@/features/server/actions';
 import { useInfo } from '@/features/server/hooks';
 import { getFileUrl, getUrlFromServer } from '@/helpers/get-file-url';
 import {
@@ -28,16 +28,18 @@ import {
   Label,
   Switch
 } from '@sharkord/ui';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useState, useEffect } from 'react';
 import { toast } from 'sonner';
 
 const Connect = memo(() => {
   const { values, r, setErrors, onChange } = useForm<{
+    serverUrl: string;
     identity: string;
     password: string;
     rememberCredentials: boolean;
     autoLogin: boolean;
   }>({
+    serverUrl: (getLocalStorageItem(LocalStorageKey.SERVER_URL) || '').replace(/\/+$/g, ''),
     identity: getLocalStorageItem(LocalStorageKey.IDENTITY) || '',
     password: getLocalStorageItem(LocalStorageKey.USER_PASSWORD) || '',
     rememberCredentials: !!getLocalStorageItem(
@@ -59,7 +61,18 @@ const Connect = memo(() => {
     setLoading(true);
 
     try {
-      const url = getUrlFromServer();
+      // normalize the URL: trim whitespace and remove any trailing slash(es);
+      // falling back to the stored/default address if the field is empty.
+      let url = values.serverUrl.trim().replace(/\/+$/g, '');
+      if (!url) {
+        url = getUrlFromServer();
+      }
+
+      // persist last server for convenience (store the normalized version)
+      if (values.serverUrl) {
+        setLocalStorageItem(LocalStorageKey.SERVER_URL, url);
+      }
+
       const response = await fetch(`${url}/login`, {
         method: 'POST',
         headers: {
@@ -110,6 +123,42 @@ const Connect = memo(() => {
     inviteCode
   ]);
 
+  // whenever the serverUrl field contains a (potentially) valid address we
+  // fetch the `/info` endpoint so that the UI can immediately display the
+  // server name/logo.  we debounce to avoid hammering the network during
+  // typing.
+  useEffect(() => {
+    // trim whitespace and drop any trailing slash before attempting to fetch
+    const raw = values.serverUrl.trim().replace(/\/+$/g, '');
+    if (!raw) return;
+
+    let candidate = raw;
+    try {
+      // try parsing; if it fails we prepend http:// and try again later
+      new URL(candidate);
+    } catch {
+      candidate = `http://${candidate}`;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await fetch(`${candidate.replace(/\/$/, '')}/info`, {
+          signal: AbortSignal.timeout(5000)
+        });
+        if (!resp.ok) {
+          throw new Error('fetch failed');
+        }
+        const data = (await resp.json()) as any;
+        setInfo(data);
+      } catch (e) {
+        // ignore errors; we don't want to display a toast on every keystroke.
+        // the connect button will still perform a final check when clicked.
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [values.serverUrl]);
+
   const logoSrc = useMemo(() => {
     if (info?.logo) {
       return getFileUrl(info.logo);
@@ -140,6 +189,14 @@ const Connect = memo(() => {
           )}
 
           <div className="flex flex-col gap-2">
+            <Group label="Server address" help="The URL of the Sharkord server you want to connect to.">
+              <Input
+                {...r('serverUrl')}
+                placeholder="https://chat.example.com"
+                // TestId constant isn't defined upstream yet, use hardcoded string
+                data-testid="connect-server-input"
+              />
+            </Group>
             <Group
               label="Identity"
               help="A unique identifier for your account on this server. You can use whatever you like, such as an email address or a username. This won't be shared publicly."

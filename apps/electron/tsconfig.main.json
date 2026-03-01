@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // use NodeNext so imports of `electron` and other ESM modules resolve
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "skipLibCheck": true,
+    // keep emit in dist/main
+    "outDir": "dist/main",
+    "rootDir": "src/main"
+  },
+  "include": [
+    "src/main/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "src/main/preload.ts"
+  ]
+}

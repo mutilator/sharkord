@@ -1,5 +1,5 @@
 import { getUrlFromServer } from '@/helpers/get-file-url';
-import { LocalStorageKey, setLocalStorageItemBool } from '@/helpers/storage';
+import { getLocalStorageItem, LocalStorageKey, setLocalStorageItemBool } from '@/helpers/storage';
 import type { TServerInfo } from '@sharkord/shared';
 import { toast } from 'sonner';
 import { setInfo } from '../server/actions';
@@ -15,7 +15,9 @@ export const setPluginsLoading = (loading: boolean) =>
 export const fetchServerInfo = async (): Promise<TServerInfo | undefined> => {
   try {
     const url = getUrlFromServer();
-    const response = await fetch(`${url}/info`);
+    const response = await fetch(`${url}/info`, {
+      signal: AbortSignal.timeout(5000) // 5 second timeout
+    });
 
     if (!response.ok) {
       throw new Error('Failed to fetch server info');
@@ -30,11 +32,22 @@ export const fetchServerInfo = async (): Promise<TServerInfo | undefined> => {
 };
 
 export const loadApp = async () => {
+  // In Electron: only fetch server info if a custom server URL is configured
+  // Otherwise skip to avoid fetching from the dev server
+  const customServerUrl = getLocalStorageItem(LocalStorageKey.SERVER_URL);
+  const url = getUrlFromServer();
+  
+  if (!customServerUrl && url === 'http://localhost:4991') {
+    setAppLoading(false);
+    return;
+  }
+
   const info = await fetchServerInfo();
 
   if (!info) {
     console.error('Failed to load server info during app load');
-    toast.error('Failed to load server info');
+    // Don't show error toast here - let the app load and user can re-try
+    setAppLoading(false);
     return;
   }
 

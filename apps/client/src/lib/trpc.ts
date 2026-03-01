@@ -18,7 +18,15 @@ let trpc: ReturnType<typeof createTRPCProxyClient<AppRouter>> | null = null;
 let currentHost: string | null = null;
 
 const initializeTRPC = (host: string) => {
-  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  // window.location.protocol is "file:" in Electron, so we can't use it to
+  // determine the WebSocket protocol. Instead, read the stored server URL.
+  const storedUrl = localStorage.getItem('sharkord-server-url');
+  let protocol: 'ws' | 'wss';
+  if (storedUrl) {
+    protocol = storedUrl.startsWith('https') ? 'wss' : 'ws';
+  } else {
+    protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  }
 
   wsClient = createWSClient({
     url: `${protocol}://${host}`,

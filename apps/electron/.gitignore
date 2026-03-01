@@ -1,0 +1,24 @@
+# dependencies
+node_modules
+dist
+
+# build outputs
+*.dmg
+*.exe
+*.msi
+*.zip
+*.AppImage
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# runtime
+out

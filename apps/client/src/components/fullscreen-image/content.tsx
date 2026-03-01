@@ -4,7 +4,9 @@ import { X } from 'lucide-react';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-const portalRoot = document.getElementById('imagePortal')!;
+// lookup lazily similar to server‑screens provider – avoids null/missing
+// element crashes in tests or early renders.
+
 
 type TFullScreenImageProps = React.ImgHTMLAttributes<HTMLImageElement>;
 
@@ -114,39 +116,50 @@ const FullScreenImage = memo((props: TFullScreenImageProps) => {
     };
   }, [isDragging]);
 
-  const portalContainer = createPortal(
-    <>
-      <div
-        className={cn(
-          'fixed inset-0 flex justify-center items-center backdrop-blur-sm bg-black/30 z-50 transition-opacity duration-300',
-          visible ? 'opacity-100' : 'opacity-0',
-          open ? 'pointer-events-auto' : 'pointer-events-none'
-        )}
-        onClick={onClickOutside}
-      >
-        <img
-          {...props}
-          style={{
-            transform: `scale(${scale}) translate(${position.x}px, ${position.y}px)`,
-            cursor: isDragging ? 'grabbing' : 'grab'
-          }}
-          className="p-4 max-w-full max-h-full object-contain transition-transform duration-100"
-          onMouseDown={handleMouseDown}
-          draggable={false}
-          onClick={(e) => e.stopPropagation()}
-        />
-        <Button
-          onClick={onCloseClick}
-          size="icon"
-          variant="outline"
-          className="absolute top-2 right-2 z-50"
-        >
-          <X size="1.1rem" />
-        </Button>
-      </div>
-    </>,
-    portalRoot
-  );
+  const portalRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    portalRef.current = document.getElementById('imagePortal');
+    if (!portalRef.current) {
+      console.warn('[FullScreenImage] image portal root not found');
+    }
+  }, []);
+
+  const portalContainer = portalRef.current
+    ? createPortal(
+        <>
+          <div
+            className={cn(
+              'fixed inset-0 flex justify-center items-center backdrop-blur-sm bg-black/30 z-50 transition-opacity duration-300',
+              visible ? 'opacity-100' : 'opacity-0',
+              open ? 'pointer-events-auto' : 'pointer-events-none'
+            )}
+            onClick={onClickOutside}
+          >
+            <img
+              {...props}
+              style={{
+                transform: `scale(${scale}) translate(${position.x}px, ${position.y}px)`,
+                cursor: isDragging ? 'grabbing' : 'grab'
+              }}
+              className="p-4 max-w-full max-h-full object-contain transition-transform duration-100"
+              onMouseDown={handleMouseDown}
+              draggable={false}
+              onClick={(e) => e.stopPropagation()}
+            />
+            <Button
+              onClick={onCloseClick}
+              size="icon"
+              variant="outline"
+              className="absolute top-2 right-2 z-50"
+            >
+              <X size="1.1rem" />
+            </Button>
+          </div>
+        </>,
+        portalRef.current
+      )
+    : null;
 
   return (
     <>
